@@ -1,0 +1,31 @@
+{
+  "name": "subagents-mode",
+  "version": "1.0.0",
+  "description": "A pi coding agent extension that adds an orchestrator mode toggle, restricting the main agent to delegate all work to subagents.",
+  "type": "module",
+  "main": "index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "echo \"No tests configured yet\" && exit 0"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "subagents",
+    "orchestrator",
+    "extension",
+    "ai-coding-agent",
+    "delegation"
+  ],
+  "author": "nawh25",
+  "license": "MIT",
+  "files": [
+    "index.ts"
+  ],
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
