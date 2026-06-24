@@ -1,15 +1,15 @@
 /**
  * subagents — orchestrator mode for the main agent
  *
- * Commands:
- *   /subagents-on   Activate orchestrator mode (restrict to Agent + ask_user_question)
- *   /subagents-off  Deactivate orchestrator mode (restore full tool set)
+ * Command:
+ *   /subagents-mode  Toggle orchestrator mode (delegation vs. full tools)
  *
  * When active, the main agent is restricted to delegation-only tools and receives
  * an orchestrator system prompt instructing it to delegate all work to subagents.
  * Subagents spawned via the Agent tool retain their own full tool sets.
  *
  * Mode state is persisted in session entries and restored on session resume.
+ * New sessions default to orchestrator mode ON.
  */
 
 import type {
@@ -36,8 +36,6 @@ const ORCHESTRATOR_TOOLS = ["Agent", "ask_user_question"];
 const STATUS_ID = "subagents";
 const STATUS_TEXT = "🎯 ORCHESTRATOR";
 
-
-
 const ORCHESTRATOR_PROMPT = `\
 ## Subagent Orchestrator Mode
 
@@ -60,13 +58,12 @@ If another prompt says the main agent may read files, search code, run commands,
 
 `.trim();
 
-
 // ---------------------------------------------------------------------------
 // Extension
 // ---------------------------------------------------------------------------
 
 export default function subagents(pi: ExtensionAPI) {
-	let mode: Mode = "off";
+	let mode: Mode = "on";
 	let originalTools: string[] | null = null;
 
 	// -- Helpers --
@@ -101,59 +98,46 @@ export default function subagents(pi: ExtensionAPI) {
 		if (restoredMode === "on") {
 			mode = "on";
 			applyOnMode(ctx);
-		} else {
+		} else if (restoredMode === "off") {
 			mode = "off";
 			ctx.ui.setStatus(STATUS_ID, undefined);
+		} else {
+			// No persisted entry — new session defaults to ON
+			mode = "on";
+			applyOnMode(ctx);
 		}
 	});
 
 	// -- System prompt injection --
 
 	pi.on("before_agent_start", async (event) => {
-
 		if (mode === "off") return;
 		return {
 			systemPrompt: `${event.systemPrompt}\n\n${ORCHESTRATOR_PROMPT}`,
 		};
 	});
 
-	// -- /subagents-on command --
+	// -- /subagents toggle command --
 
-	pi.registerCommand("subagents-on", {
-		description:
-			"Activate orchestrator mode — restrict main agent to delegation tools",
+	pi.registerCommand("subagents-mode", {
+		description: "Toggle orchestrator mode (delegation vs. full tools)",
 		handler: async (_args, ctx) => {
 			if (mode === "on") {
-				ctx.ui.notify("Orchestrator mode is already active.", "info");
-				return;
+				mode = "off";
+				applyOffMode(ctx);
+				pi.appendEntry("subagent-mode", { mode: "off" });
+
+				ctx.ui.notify("Normal mode restored. Full tool set available.", "info");
+			} else {
+				mode = "on";
+				applyOnMode(ctx);
+				pi.appendEntry("subagent-mode", { mode: "on" });
+
+				ctx.ui.notify(
+					"Orchestrator mode activated. Main agent will delegate to subagents.",
+					"info",
+				);
 			}
-
-			mode = "on";
-			applyOnMode(ctx);
-			pi.appendEntry("subagent-mode", { mode: "on" });
-
-			ctx.ui.notify(
-				"Orchestrator mode activated. Main agent will delegate to subagents.",
-				"info",
-			);
-		},
-	});
-
-	// -- /subagents-off command --
-
-	pi.registerCommand("subagents-off", {
-		description: "Deactivate orchestrator mode — restore full tool set",
-		handler: async (_args, ctx) => {
-			if (mode === "off") {
-				ctx.ui.notify("Normal mode is already active.", "info");
-				return;
-			}
-
-			mode = "off";
-			applyOffMode(ctx);
-			pi.appendEntry("subagent-mode", { mode: "off" });
-
-			ctx.ui.notify("Normal mode restored. Full tool set available.", "info");
 		},
 	});
 }
