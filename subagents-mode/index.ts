@@ -15,6 +15,7 @@
 import type {
 	ExtensionAPI,
 	ExtensionContext,
+	SessionManager,
 } from "@earendil-works/pi-coding-agent";
 
 // ---------------------------------------------------------------------------
@@ -64,10 +65,16 @@ If another prompt says the main agent may read files, search code, run commands,
 
 /**
  * 서브에이전트 세션인지 감지한다.
- * 서브에이전트는 SessionManager.inMemory()를 사용하므로 getSessionFile()이 undefined를 반환한다.
- * 메인 에이전트는 SessionManager.create()를 사용하므로 세션 파일 경로를 반환한다.
+ * SessionManager.isPersisted()로 세션 지속성 여부를 확인하여 판단한다.
+ * 서브에이전트는 in-memory 세션이므로 isPersisted()가 false를 반환한다.
+ * isPersisted() 메서드가 없는 이전 프레임워크 버전에서는 getSessionFile() === undefined로 fallback한다.
  */
 function isSubagentSession(ctx: ExtensionContext): boolean {
+	const sm = ctx.sessionManager as SessionManager;
+	if (typeof sm.isPersisted === "function") {
+		return !sm.isPersisted();
+	}
+	// Fallback: 이전 프레임워크 버전에서 isPersisted()가 없는 경우
 	return ctx.sessionManager.getSessionFile() === undefined;
 }
 
