@@ -32,7 +32,7 @@ interface SubagentModeEntry {
 // Constants
 // ---------------------------------------------------------------------------
 
-const ORCHESTRATOR_TOOLS = ["Agent", "ask_user_question"];
+const ORCHESTRATOR_TOOLS = ["Agent", "ask_user_question", "bash"];
 
 const STATUS_ID = "subagents";
 const STATUS_TEXT = "🎯 ORCHESTRATOR";
@@ -50,7 +50,7 @@ The main agent is a coordinator only. It must delegate actual work to subagents.
 2. Use ask_user_question only when user requirements are ambiguous.
 3. Do not read files directly.
 4. Do not write or edit files directly.
-5. Do not run shell commands directly.
+5. Do not run shell commands directly, EXCEPT for \`openspec\` CLI commands (e.g., \`openspec list --json\`, \`openspec status --change "<name>" --json\`). You may run these directly to check OpenSpec state. All other shell commands must be delegated to subagents.
 6. Do not search code directly.
 7. Aggregate subagent results and report clearly to the user.
 8. For complex work, split tasks into independent subagent jobs when possible.
@@ -76,6 +76,57 @@ function isSubagentSession(ctx: ExtensionContext): boolean {
 	}
 	// Fallback: 이전 프레임워크 버전에서 isPersisted()가 없는 경우
 	return ctx.sessionManager.getSessionFile() === undefined;
+}
+
+/**
+ * openspec CLI에서 허용된 서브명령 목록
+ * 새 서브명령이 추가되면 이 목록에 이름만 추가하면 된다.
+ */
+const OPENSPEC_SUBCOMMANDS = new Set([
+	"list",
+	"status",
+	"show",
+	"validate",
+	"instructions",
+	"schemas",
+	"new",
+	"apply",
+	"archive",
+	"templates",
+	"init",
+	"update",
+]);
+
+/**
+ * 주어진 bash 명령어가 openspec CLI 명령어인지 확인한다.
+ * 오케스트레이터 모드에서 메인 에이전트는 openspec 명령어만 직접 실행할 수 있다.
+ *
+ * 세 가지 조건을 모두 만족해야 한다:
+ * 1. 명령어가 `openspec`으로 시작해야 한다.
+ * 2. 두 번째 토큰(서브명령)이 허용된 목록에 있어야 한다.
+ * 3. 셸 메타문자를 포함하지 않아야 한다 (명령어 체이닝/파이핑/서브셸/리다이렉션 방지).
+ *
+ * @param command - bash 도구에 전달된 명령어 문자열
+ * @returns 세 조건을 모두 만족하면 true, 그렇지 않으면 false
+ */
+function isOpenspecCommand(command: string): boolean {
+	// openspec으로 시작하는지 확인 (대소문자 무시, 앞뒤 공백 허용)
+	if (!/^\s*openspec\s+/i.test(command)) {
+		return false;
+	}
+	// 셸 메타문자 차단 — 명령어 체이닝, 파이핑, 서브셸, 리다이렉션 모두 방지
+	// openspec 명령어는 순수한 인자만 받으므로 메타문자가 필요 없다
+	if (/[;|&`$()<>]/.test(command)) {
+		return false;
+	}
+	// 서브명령이 허용된 목록에 있는지 확인
+	const tokens = command.trim().split(/\s+/);
+	// tokens[0] === "openspec", tokens[1] === 서브명령
+	if (tokens.length < 2) {
+		return false;
+	}
+	const subcommand = tokens[1].toLowerCase();
+	return OPENSPEC_SUBCOMMANDS.has(subcommand);
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +191,26 @@ export default function subagents(pi: ExtensionAPI) {
 		return {
 			systemPrompt: `${event.systemPrompt}\n\n${ORCHESTRATOR_PROMPT}`,
 		};
+	});
+
+	// -- Bash command filtering in orchestrator mode --
+	// 오케스트레이터 모드에서 메인 에이전트는 openspec CLI 명령어만 직접 실행할 수 있다.
+	// 다른 모든 bash 명령어는 차단되며, 서브에이전트에게 위임해야 한다.
+
+	pi.on("tool_call", async (event, ctx) => {
+		// 모드 OFF 또는 서브에이전트 세션인 경우 필터링을 적용하지 않는다
+		if (mode === "off") return;
+		if (isSubagentSession(ctx)) return;
+		// bash 도구가 아닌 경우 필터링을 적용하지 않는다
+		if (event.toolName !== "bash") return;
+
+		const command = (event.input as { command?: string }).command ?? "";
+		if (!isOpenspecCommand(command)) {
+			return {
+				block: true,
+				reason: `Orchestrator mode: only \`openspec\` CLI commands are allowed directly. Delegate other shell commands to a subagent.\nCommand: ${command}`,
+			};
+		}
 	});
 
 	// -- /subagents toggle command --
