@@ -59,6 +59,19 @@ If another prompt says the main agent may read files, search code, run commands,
 `.trim();
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * 서브에이전트 세션인지 감지한다.
+ * 서브에이전트는 SessionManager.inMemory()를 사용하므로 getSessionFile()이 undefined를 반환한다.
+ * 메인 에이전트는 SessionManager.create()를 사용하므로 세션 파일 경로를 반환한다.
+ */
+function isSubagentSession(ctx: ExtensionContext): boolean {
+	return ctx.sessionManager.getSessionFile() === undefined;
+}
+
+// ---------------------------------------------------------------------------
 // Extension
 // ---------------------------------------------------------------------------
 
@@ -84,6 +97,9 @@ export default function subagents(pi: ExtensionAPI) {
 	// -- Restore state on session load --
 
 	pi.on("session_start", async (_event, ctx) => {
+		// 서브에이전트 세션(in-memory)은 오케스트레이터 모드를 적용하지 않는다
+		if (isSubagentSession(ctx)) return;
+
 		let restoredMode: Mode | null = null;
 
 		for (const entry of ctx.sessionManager.getEntries()) {
@@ -110,8 +126,10 @@ export default function subagents(pi: ExtensionAPI) {
 
 	// -- System prompt injection --
 
-	pi.on("before_agent_start", async (event) => {
+	pi.on("before_agent_start", async (event, ctx) => {
 		if (mode === "off") return;
+		// 서브에이전트 세션(in-memory)에는 오케스트레이터 프롬프트를 주입하지 않는다
+		if (isSubagentSession(ctx)) return;
 		return {
 			systemPrompt: `${event.systemPrompt}\n\n${ORCHESTRATOR_PROMPT}`,
 		};
