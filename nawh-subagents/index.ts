@@ -23,6 +23,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import type { ChildProcess } from "node:child_process";
 
 import type {
 	AgentDefinition,
@@ -193,7 +194,7 @@ interface SessionState {
 	config: PantheonConfig;
 	agents: AgentDefinition[];
 	/** Running subprocesses for cleanup on shutdown. */
-	activeProcesses: Set<{ kill: (signal?: string) => void }>;
+	activeProcesses: Set<ChildProcess>;
 }
 
 // ---------------------------------------------------------------------------
@@ -405,6 +406,14 @@ export default function (pi: ExtensionAPI): void {
 				cwd: params.cwd,
 			};
 
+			// Create registerProcess callback for lifecycle tracking
+			const registerProcess = (child: ChildProcess): (() => void) => {
+				state!.activeProcesses.add(child);
+				return () => {
+					state!.activeProcesses.delete(child);
+				};
+			};
+
 			// --- Council routing ---
 			// If single mode with agent "council", route to runCouncil
 			if (params.agent === "council" && params.task !== undefined) {
@@ -416,6 +425,7 @@ export default function (pi: ExtensionAPI): void {
 					signal,
 					onUpdate,
 					ctx,
+					registerProcess,
 				);
 			}
 
@@ -424,6 +434,7 @@ export default function (pi: ExtensionAPI): void {
 				cwd: ctx.cwd,
 				signal: signal ?? ctx.signal,
 				ui: ctx.ui as ExtensionUIContext | undefined,
+				registerProcess,
 			};
 
 			const result: ToolResult = await executeSubagent(
@@ -691,6 +702,7 @@ async function executeCouncil(
 	signal: AbortSignal | undefined,
 	onUpdate: ((partialResult: any) => void) | undefined,
 	_ctx: ExtensionContext,
+	registerProcess?: (child: ChildProcess) => () => void,
 ): Promise<any> {
 	// Find the council agent definition
 	const councilAgentDef = agents.find(
@@ -775,6 +787,7 @@ async function executeCouncil(
 		signal,
 		onCouncilUpdate,
 		makeDetails,
+		registerProcess,
 	);
 
 	// Build the output text

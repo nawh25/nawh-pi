@@ -24,9 +24,10 @@ import type {
 	SubagentDetails,
 	UsageStats,
 } from "./types";
+import type { ChildProcess } from "node:child_process";
 
 import {
-	runSingleAgent,
+	runSingleAgentWithRetry,
 	mapWithConcurrencyLimit,
 	truncateParallelOutput,
 } from "./runner";
@@ -238,6 +239,7 @@ export async function runCouncil(
 	signal: AbortSignal | undefined,
 	onUpdate: () => void,
 	makeDetails: () => SubagentDetails,
+	registerProcess?: (child: ChildProcess) => () => void,
 ): Promise<SingleResult> {
 	// --- Task 7.1: Prepare councillor prompts --------------------------------
 
@@ -301,7 +303,7 @@ export async function runCouncil(
 				onUpdate();
 			};
 
-			const result = await runSingleAgent(
+			const result = await runSingleAgentWithRetry(
 				cwd,
 				[agentDef],
 				councillor.name,
@@ -311,6 +313,14 @@ export async function runCouncil(
 				signal,
 				councillorOnUpdate,
 				councillorMakeDetails,
+				{
+					pantheonConfig,
+					registerProcess,
+					idleTimeoutMs: pantheonConfig.idleTimeoutMs,
+					stderrCapBytes: pantheonConfig.stderrCapBytes,
+				},
+				pantheonConfig.maxRetries,
+				pantheonConfig.retryBackoffBaseMs,
 			);
 
 			// Determine councillor status
@@ -399,7 +409,7 @@ export async function runCouncil(
 		onUpdate();
 	};
 
-	const synthesisResult = await runSingleAgent(
+	const synthesisResult = await runSingleAgentWithRetry(
 		cwd,
 		[synthesisAgentDef],
 		synthesisAgentDef.name,
@@ -409,6 +419,14 @@ export async function runCouncil(
 		signal,
 		synthesisOnUpdate,
 		synthesisMakeDetails,
+		{
+			pantheonConfig,
+			registerProcess,
+			idleTimeoutMs: pantheonConfig.idleTimeoutMs,
+			stderrCapBytes: pantheonConfig.stderrCapBytes,
+		},
+		pantheonConfig.maxRetries,
+		pantheonConfig.retryBackoffBaseMs,
 	);
 
 	// --- Task 7.5: Return synthesis result ----------------------------------

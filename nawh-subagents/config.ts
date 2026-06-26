@@ -36,6 +36,10 @@ const DEFAULT_PRESET = "default";
 const DEFAULT_MAX_PARALLEL = 8;
 const DEFAULT_MAX_CONCURRENCY = 4;
 const DEFAULT_CONFIRM_PROJECT_AGENTS = true;
+const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_RETRY_BACKOFF_BASE_MS = 2000;
+const DEFAULT_IDLE_TIMEOUT_MS = 60000;
+const DEFAULT_STDERR_CAP_BYTES = 65536;
 
 /** Default councillor set used when no valid councillors are configured. */
 const DEFAULT_COUNCILLORS: CouncillorConfig[] = [
@@ -99,6 +103,10 @@ export function loadConfig(): PantheonConfig {
 		maxParallel: DEFAULT_MAX_PARALLEL,
 		maxConcurrency: DEFAULT_MAX_CONCURRENCY,
 		confirmProjectAgents: DEFAULT_CONFIRM_PROJECT_AGENTS,
+		maxRetries: DEFAULT_MAX_RETRIES,
+		retryBackoffBaseMs: DEFAULT_RETRY_BACKOFF_BASE_MS,
+		idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS,
+		stderrCapBytes: DEFAULT_STDERR_CAP_BYTES,
 	};
 
 	// Attempt to read the config file
@@ -197,6 +205,46 @@ export function loadConfig(): PantheonConfig {
 	} else if (parsed.confirmProjectAgents !== undefined) {
 		warn(
 			`Invalid "confirmProjectAgents" value in config (expected boolean); using default ${DEFAULT_CONFIRM_PROJECT_AGENTS}.`,
+		);
+	}
+
+	// --- maxRetries -----------------------------------------------------
+	const maxRetries = clampInt(parsed.maxRetries, 0, 10);
+	if (maxRetries !== undefined) {
+		config.maxRetries = maxRetries;
+	} else if (parsed.maxRetries !== undefined) {
+		warn(
+			`Invalid "maxRetries" value in config (expected integer 0-10); using default ${DEFAULT_MAX_RETRIES}.`,
+		);
+	}
+
+	// --- retryBackoffBaseMs ---------------------------------------------
+	const retryBackoffBaseMs = clampInt(parsed.retryBackoffBaseMs, 100, 60000);
+	if (retryBackoffBaseMs !== undefined) {
+		config.retryBackoffBaseMs = retryBackoffBaseMs;
+	} else if (parsed.retryBackoffBaseMs !== undefined) {
+		warn(
+			`Invalid "retryBackoffBaseMs" value in config (expected integer 100-60000); using default ${DEFAULT_RETRY_BACKOFF_BASE_MS}.`,
+		);
+	}
+
+	// --- idleTimeoutMs --------------------------------------------------
+	const idleTimeoutMs = clampInt(parsed.idleTimeoutMs, 0, 600000);
+	if (idleTimeoutMs !== undefined) {
+		config.idleTimeoutMs = idleTimeoutMs;
+	} else if (parsed.idleTimeoutMs !== undefined) {
+		warn(
+			`Invalid "idleTimeoutMs" value in config (expected integer 0-600000); using default ${DEFAULT_IDLE_TIMEOUT_MS}.`,
+		);
+	}
+
+	// --- stderrCapBytes -------------------------------------------------
+	const stderrCapBytes = clampInt(parsed.stderrCapBytes, 1024, 1048576);
+	if (stderrCapBytes !== undefined) {
+		config.stderrCapBytes = stderrCapBytes;
+	} else if (parsed.stderrCapBytes !== undefined) {
+		warn(
+			`Invalid "stderrCapBytes" value in config (expected integer 1024-1048576); using default ${DEFAULT_STDERR_CAP_BYTES}.`,
 		);
 	}
 

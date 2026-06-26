@@ -151,6 +151,14 @@ export interface PantheonConfig {
 	maxConcurrency: number;
 	/** Whether to confirm with the user before running project-level agents (default true). */
 	confirmProjectAgents: boolean;
+	/** Maximum retry attempts per subagent (default 3). */
+	maxRetries: number;
+	/** Base delay for exponential backoff in milliseconds (default 2000). */
+	retryBackoffBaseMs: number;
+	/** Inactivity timeout in milliseconds; 0 disables (default 60000). */
+	idleTimeoutMs: number;
+	/** Maximum accumulated stderr per subprocess in bytes (default 65536). */
+	stderrCapBytes: number;
 }
 
 /**

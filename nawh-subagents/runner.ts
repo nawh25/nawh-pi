@@ -68,6 +68,23 @@ export interface ToolResult {
 	error?: string;
 }
 
+/**
+ * Options for {@link runSingleAgent}.
+ *
+ * Bundles the pantheon config, process registration callback, idle
+ * timeout, and stderr cap so the signature stays manageable.
+ */
+export interface RunSingleAgentOptions {
+	/** Loaded pantheon config (for preset resolution). */
+	pantheonConfig: PantheonConfig;
+	/** Optional callback to register/unregister the spawned child process. */
+	registerProcess?: (child: ChildProcess) => () => void;
+	/** Inactivity timeout in ms; 0 disables. */
+	idleTimeoutMs?: number;
+	/** Maximum accumulated stderr in bytes. */
+	stderrCapBytes?: number;
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -290,6 +307,7 @@ function inferActivity(messages: Message[]): string {
  * @param signal - Optional AbortSignal for cancellation.
  * @param onUpdate - Callback invoked on each parsed event for UI refresh.
  * @param makeDetails - Factory that returns the current SubagentDetails snapshot.
+ * @param options - Execution options (pantheon config, process registration, idle timeout, stderr cap).
  * @returns A {@link SingleResult} with output, usage, messages, and details.
  */
 export async function runSingleAgent(
@@ -302,6 +320,7 @@ export async function runSingleAgent(
 	signal: AbortSignal | undefined,
 	onUpdate: () => void,
 	makeDetails: () => SubagentDetails,
+	options: RunSingleAgentOptions,
 ): Promise<SingleResult> {
 	// 1. Find the agent by name
 	const agentDef = agents.find((a) => a.name === agentName);
@@ -314,33 +333,7 @@ export async function runSingleAgent(
 	}
 
 	// 2. Resolve the agent configuration (merge frontmatter with preset)
-	const config = resolveAgentConfig(
-		agentDef,
-		// We need a PantheonConfig; but runSingleAgent doesn't receive one.
-		// The caller (execute) passes the resolved config via agent definition.
-		// Since resolveAgentConfig needs PantheonConfig, we use a minimal
-		// fallback that applies no preset overrides.
-		// In practice, execute() pre-resolves configs, but this function
-		// is also called directly by council.ts which passes resolved agents.
-		// We'll create a default config that doesn't override anything.
-		{
-			preset: "default",
-			presets: {},
-			disabledAgents: [],
-			maxParallel: DEFAULT_CONCURRENCY,
-			maxConcurrency: DEFAULT_CONCURRENCY,
-			confirmProjectAgents: true,
-		},
-	);
-
-	// Actually, we should accept a PantheonConfig parameter. But the task
-	// spec says to use resolveAgentConfig from config.ts. Since
-	// runSingleAgent's signature in the task doesn't include PantheonConfig,
-	// we need to handle this. The approach above uses a no-op config which
-	// means preset overrides won't apply. This is acceptable for the
-	// runner-level function since execute() (which has PantheonConfig) is
-	// the main entry point. Council.ts will also need to pass resolved
-	// configs. We proceed with the default config approach.
+	const config = resolveAgentConfig(agentDef, options.pantheonConfig);
 
 	// 3. Write system prompt to a temp file
 	const tempFile = writePromptToTempFile(agentName, config.systemPrompt);
@@ -379,18 +372,26 @@ export async function runSingleAgent(
 		env: { ...process.env },
 	});
 
+	// Register the spawned process for lifecycle tracking
+	const unregisterProcess = options.registerProcess?.(child);
+
 	// 6. Set up accumulators
 	const messages: Message[] = [];
 	let usage: UsageStats | undefined;
 	let lastAssistantText = "";
 	let aborted = false;
+	let timedOut = false;
+	let stderrTruncated = false;
 	let exitCode: number | null = null;
 
 	// 7. Handle abort signal
 	let sigkillTimer: ReturnType<typeof setTimeout> | undefined;
 
-	const onAbort = (): void => {
-		aborted = true;
+	/**
+	 * Kill the child process: SIGTERM → 5s grace → SIGKILL.
+	 * Used by both the abort handler and the idle timeout.
+	 */
+	const killProcess = (): void => {
 		if (!child.killed && child.pid) {
 			child.kill("SIGTERM");
 			sigkillTimer = setTimeout(() => {
@@ -399,6 +400,11 @@ export async function runSingleAgent(
 				}
 			}, ABORT_GRACE_PERIOD_MS);
 		}
+	};
+
+	const onAbort = (): void => {
+		aborted = true;
+		killProcess();
 	};
 
 	if (signal) {
@@ -410,10 +416,29 @@ export async function runSingleAgent(
 		}
 	}
 
+	// 7b. Idle timeout timer
+	const idleTimeoutMs = options.idleTimeoutMs ?? 0;
+	let idleTimer: ReturnType<typeof setTimeout> | undefined;
+
+	const resetIdleTimer = (): void => {
+		if (idleTimer) clearTimeout(idleTimer);
+		if (idleTimeoutMs > 0 && !aborted && !timedOut) {
+			idleTimer = setTimeout(() => {
+				timedOut = true;
+				killProcess();
+			}, idleTimeoutMs);
+		}
+	};
+
+	if (idleTimeoutMs > 0) {
+		resetIdleTimer();
+	}
+
 	// 8. Parse stdout line by line as JSON
 	let stdoutBuffer = "";
 
 	child.stdout?.on("data", (chunk: Buffer) => {
+		resetIdleTimer();
 		stdoutBuffer += chunk.toString("utf-8");
 		const lines = stdoutBuffer.split("\n");
 		// Keep the last (possibly incomplete) line in the buffer
@@ -480,24 +505,34 @@ export async function runSingleAgent(
 
 	// Capture stderr for error reporting
 	let stderrText = "";
+	const stderrCapBytes = options.stderrCapBytes ?? 65536;
 	child.stderr?.on("data", (chunk: Buffer) => {
-		stderrText += chunk.toString("utf-8");
+		resetIdleTimer();
+		if (!stderrTruncated) {
+			stderrText += chunk.toString("utf-8");
+			if (Buffer.byteLength(stderrText) > stderrCapBytes) {
+				stderrTruncated = true;
+			}
+		}
 	});
 
 	// 9. Wait for process to exit
 	await new Promise<void>((resolve) => {
 		child.on("close", (code: number | null) => {
 			exitCode = code;
+			unregisterProcess?.();
 			resolve();
 		});
 		child.on("error", (err: Error) => {
 			stderrText += `\nSpawn error: ${err.message}`;
 			exitCode = -1;
+			unregisterProcess?.();
 			resolve();
 		});
 	});
 
-	// Clean up abort listener and timer
+	// Clean up abort listener, timers, and idle timer
+	if (idleTimer) clearTimeout(idleTimer);
 	if (signal) {
 		signal.removeEventListener("abort", onAbort);
 	}
@@ -527,6 +562,21 @@ export async function runSingleAgent(
 		};
 	}
 
+	if (timedOut) {
+		details.status = "failed";
+		return {
+			output: lastAssistantText,
+			usage,
+			error: `subagent timed out (idle for ${idleTimeoutMs}ms)`,
+			details,
+			messages,
+		};
+	}
+
+	if (stderrTruncated) {
+		stderrText += `... [stderr truncated at ${stderrCapBytes} bytes]`;
+	}
+
 	if (exitCode !== null && exitCode !== 0) {
 		details.status = "failed";
 		const errMsg =
@@ -548,6 +598,112 @@ export async function runSingleAgent(
 		details,
 		messages,
 	};
+}
+
+// ---------------------------------------------------------------------------
+// Retry wrapper
+// ---------------------------------------------------------------------------
+
+/**
+ * Determine whether an error is permanent (should not be retried).
+ *
+ * Returns `true` for errors that indicate a fundamental problem with
+ * the request or user cancellation — retrying would produce the same
+ * result.
+ */
+export function isPermanentError(error: string): boolean {
+	const lower = error.toLowerCase();
+	return (
+		lower.includes("unknown agent") ||
+		lower.includes("invalid arguments") ||
+		lower.includes("aborted") ||
+		lower.includes("cancelled")
+	);
+}
+
+/**
+ * Wrap {@link runSingleAgent} with retry-with-exponential-backoff.
+ *
+ * Loops up to `maxRetries + 1` attempts. After each failed attempt that
+ * is NOT classified as permanent by {@link isPermanentError}, the
+ * function sleeps for `retryBackoffBaseMs * 2^(attempt-1)` milliseconds
+ * before the next try. The sleep is abortable — if the signal fires
+ * during the backoff, the loop exits immediately.
+ *
+ * @param maxRetries - Maximum number of retry attempts (0 = no retry).
+ * @param retryBackoffBaseMs - Base delay for exponential backoff.
+ * @returns The last {@link SingleResult} (success or final failure).
+ */
+export async function runSingleAgentWithRetry(
+	defaultCwd: string,
+	agents: AgentDefinition[],
+	agentName: string,
+	task: string,
+	cwd: string | undefined,
+	step: string | undefined,
+	signal: AbortSignal | undefined,
+	onUpdate: () => void,
+	makeDetails: () => SubagentDetails,
+	options: RunSingleAgentOptions,
+	maxRetries: number = 0,
+	retryBackoffBaseMs: number = 2000,
+): Promise<SingleResult> {
+	let lastResult: SingleResult | undefined;
+
+	for (let attempt = 0; attempt <= maxRetries; attempt++) {
+		// Check if aborted before each attempt
+		if (signal?.aborted) {
+			return (
+				lastResult ?? {
+					output: "",
+					error: "Subagent was aborted",
+					messages: [],
+				}
+			);
+		}
+
+		lastResult = await runSingleAgent(
+			defaultCwd,
+			agents,
+			agentName,
+			task,
+			cwd,
+			step,
+			signal,
+			onUpdate,
+			makeDetails,
+			options,
+		);
+
+		// Success — return immediately
+		if (!lastResult.error) return lastResult;
+
+		// Permanent error — no retry
+		if (isPermanentError(lastResult.error)) return lastResult;
+
+		// Last attempt exhausted — return the failure
+		if (attempt === maxRetries) return lastResult;
+
+		// Sleep with exponential backoff (abortable)
+		const sleepMs = retryBackoffBaseMs * 2 ** attempt;
+		await new Promise<void>((resolve) => {
+			const timer = setTimeout(resolve, sleepMs);
+			if (signal) {
+				const onAbortSleep = (): void => {
+					clearTimeout(timer);
+					resolve();
+				};
+				signal.addEventListener("abort", onAbortSleep, { once: true });
+			}
+		});
+
+		// Check abort after sleep
+		if (signal?.aborted) {
+			return lastResult;
+		}
+	}
+
+	return lastResult!;
 }
 
 // ---------------------------------------------------------------------------
@@ -579,7 +735,12 @@ export async function mapWithConcurrencyLimit<T, R>(
 	async function runNext(): Promise<void> {
 		while (nextIndex < items.length) {
 			const myIndex = nextIndex++;
-			results[myIndex] = await fn(items[myIndex], myIndex);
+			try {
+				results[myIndex] = await fn(items[myIndex], myIndex);
+			} catch (err) {
+				// Store error sentinel so other workers continue
+				(results as any[])[myIndex] = { __retryError: err };
+			}
 		}
 	}
 
@@ -591,7 +752,7 @@ export async function mapWithConcurrencyLimit<T, R>(
 		workers.push(runNext());
 	}
 
-	await Promise.all(workers);
+	await Promise.allSettled(workers);
 	return results;
 }
 
@@ -659,6 +820,7 @@ export async function execute(
 		cwd: string;
 		signal: AbortSignal | undefined;
 		ui?: { setWidget: (key: string, content: string[] | undefined) => void };
+		registerProcess?: (child: ChildProcess) => () => void;
 	},
 	agents: AgentDefinition[],
 	config: PantheonConfig,
@@ -707,10 +869,11 @@ async function executeSingle(
 	cwd: string | undefined,
 	defaultCwd: string,
 	agents: AgentDefinition[],
-	_config: PantheonConfig,
+	config: PantheonConfig,
 	signal: AbortSignal | undefined,
 	ctx: {
 		ui?: { setWidget: (key: string, content: string[] | undefined) => void };
+		registerProcess?: (child: ChildProcess) => () => void;
 	},
 ): Promise<ToolResult> {
 	const startTime = Date.now();
@@ -747,7 +910,7 @@ async function executeSingle(
 		]);
 	};
 
-	const result = await runSingleAgent(
+	const result = await runSingleAgentWithRetry(
 		defaultCwd,
 		agents,
 		agentName,
@@ -757,6 +920,14 @@ async function executeSingle(
 		signal,
 		onUpdate,
 		makeDetails,
+		{
+			pantheonConfig: config,
+			registerProcess: ctx.registerProcess,
+			idleTimeoutMs: config.idleTimeoutMs,
+			stderrCapBytes: config.stderrCapBytes,
+		},
+		config.maxRetries,
+		config.retryBackoffBaseMs,
 	);
 
 	// Clear widget
@@ -798,6 +969,7 @@ async function executeParallel(
 	signal: AbortSignal | undefined,
 	ctx: {
 		ui?: { setWidget: (key: string, content: string[] | undefined) => void };
+		registerProcess?: (child: ChildProcess) => () => void;
 	},
 ): Promise<ToolResult> {
 	// Validate max 8 tasks
@@ -867,7 +1039,7 @@ async function executeParallel(
 				updateWidget();
 			};
 
-			const result = await runSingleAgent(
+			const result = await runSingleAgentWithRetry(
 				defaultCwd,
 				agents,
 				taskItem.agent,
@@ -877,6 +1049,14 @@ async function executeParallel(
 				signal,
 				onUpdate,
 				makeDetails,
+				{
+					pantheonConfig: config,
+					registerProcess: ctx.registerProcess,
+					idleTimeoutMs: config.idleTimeoutMs,
+					stderrCapBytes: config.stderrCapBytes,
+				},
+				config.maxRetries,
+				config.retryBackoffBaseMs,
 			);
 
 			runningCount--;
@@ -901,6 +1081,22 @@ async function executeParallel(
 
 	// Clear widget
 	ctx.ui?.setWidget?.("subagents", undefined);
+
+	// Check for error sentinels from mapWithConcurrencyLimit and convert
+	for (let i = 0; i < results.length; i++) {
+		const r = results[i] as any;
+		if (r && typeof r === "object" && "__retryError" in r) {
+			const err = r.__retryError;
+			const errMsg = err instanceof Error ? err.message : String(err);
+			allDetails[i].status = "failed";
+			allDetails[i].error = errMsg;
+			results[i] = {
+				output: "",
+				error: errMsg,
+				messages: [],
+			} as any;
+		}
+	}
 
 	// Build output from results, capped at 50KB each
 	const outputParts: string[] = [];
@@ -945,6 +1141,7 @@ async function executeChain(
 	signal: AbortSignal | undefined,
 	ctx: {
 		ui?: { setWidget: (key: string, content: string[] | undefined) => void };
+		registerProcess?: (child: ChildProcess) => () => void;
 	},
 ): Promise<ToolResult> {
 	const allDetails: SubagentDetails[] = [];
@@ -991,7 +1188,7 @@ async function executeChain(
 			]);
 		};
 
-		const result = await runSingleAgent(
+		const result = await runSingleAgentWithRetry(
 			defaultCwd,
 			agents,
 			step.agent,
@@ -1001,6 +1198,14 @@ async function executeChain(
 			signal,
 			onUpdate,
 			makeDetails,
+			{
+				pantheonConfig: config,
+				registerProcess: ctx.registerProcess,
+				idleTimeoutMs: config.idleTimeoutMs,
+				stderrCapBytes: config.stderrCapBytes,
+			},
+			config.maxRetries,
+			config.retryBackoffBaseMs,
 		);
 
 		const details = makeDetails();
