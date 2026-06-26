@@ -1,0 +1,22 @@
+{
+  "name": "nawh-subagents",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "index.ts",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "engines": {
+    "pi-coding-agent": "*"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.32.0",
+    "typebox": "^1.1.38"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1"
+  }
+}
