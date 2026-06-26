@@ -503,7 +503,11 @@ export default function (pi: ExtensionAPI): void {
 			lines.push("╭─ Agents ───────────────────────────╮");
 			for (const agent of agents) {
 				const sourceTag =
-					agent.source.type === "project" ? "[project]" : "[user]";
+					agent.source.type === "project"
+						? "[project]"
+						: agent.source.type === "extension"
+							? "[builtin]"
+							: "[user]";
 				const isDisabled = config.disabledAgents.includes(agent.name);
 				const status = isDisabled ? "✗" : "✓";
 				const councilTag = agent.isCouncil ? " (council)" : "";

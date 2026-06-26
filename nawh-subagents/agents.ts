@@ -10,7 +10,19 @@ import { readdirSync, existsSync, statSync } from "node:fs";
 import { readFileSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 import type { AgentDefinition, AgentScope } from "./types";
+
+/**
+ * The directory where this module resides, resolved via `import.meta.url`.
+ * Used to locate the extension's bundled `./agents/*.md` files.
+ */
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Absolute path to the extension's bundled agent definitions.
+ */
+const builtinAgentsDir = join(__dirname, "agents");
 
 /**
  * Parse the YAML frontmatter and body from a markdown file's content.
@@ -136,7 +148,7 @@ function parseScalar(value: string): unknown {
  */
 export function loadAgentsFromDir(
 	dir: string,
-	source: "user" | "project",
+	source: "user" | "project" | "extension",
 ): AgentDefinition[] {
 	const agents: AgentDefinition[] = [];
 
@@ -242,50 +254,76 @@ export function findNearestProjectAgentsDir(cwd: string): string | null {
 }
 
 /**
+ * Load extension-bundled (built-in) agent definitions from the extension's
+ * own `./agents/*.md` directory.
+ *
+ * These are always loaded as the base layer during discovery, regardless
+ * of `agentScope`.
+ *
+ * @returns Array of built-in agent definitions (possibly empty).
+ */
+export function loadBuiltinAgents(): AgentDefinition[] {
+	return loadAgentsFromDir(builtinAgentsDir, "extension");
+}
+
+/**
  * Task 3.3: Discover agents from the filesystem based on scope.
  *
- * - `"user"`: loads only from `~/.pi/agent/agents/` (user-level).
- * - `"project"`: loads only from the nearest `.pi/agents/` directory.
- * - `"both"`: loads user-level agents, then project-level agents, with
- *   project agents overriding user agents of the same name.
+ * Extension-bundled agents from the extension's own `./agents/*.md`
+ * directory are always loaded as the base layer, regardless of scope.
+ * User-level and project-level agents are loaded on top according to
+ * scope, with higher-priority sources overriding lower-priority ones
+ * by agent name.
+ *
+ * Merge priority: extension (base) → user (override) → project (highest).
+ *
+ * - `"user"`: extension + user-level agents.
+ * - `"project"`: extension + project-level agents.
+ * - `"both"`: extension + user + project agents.
  *
  * Missing directories are handled gracefully (treated as empty).
  *
  * @param cwd - Current working directory (used for project-level discovery).
- * @param scope - Which agent sources to load.
+ * @param scope - Which agent sources to load (user/project additional layers).
  * @returns Merged array of agent definitions.
  */
 export function discoverAgents(
 	cwd: string,
 	scope: AgentScope,
 ): AgentDefinition[] {
+	// Extension-bundled agents are always loaded as the base layer
+	const extensionAgents = loadBuiltinAgents();
+
 	const userAgentsDir = join(homedir(), ".pi", "agent", "agents");
-
 	const userAgents = loadAgentsFromDir(userAgentsDir, "user");
-
-	if (scope === "user") {
-		return userAgents;
-	}
 
 	const projectAgentsDir = findNearestProjectAgentsDir(cwd);
 	const projectAgents = projectAgentsDir
 		? loadAgentsFromDir(projectAgentsDir, "project")
 		: [];
 
-	if (scope === "project") {
-		return projectAgents;
-	}
-
-	// scope === "both": merge with project overriding user by name
+	// Merge: extension (base) → user → project (highest priority)
 	const merged = new Map<string, AgentDefinition>();
 
-	for (const agent of userAgents) {
+	// Extension agents are the base layer (always included)
+	for (const agent of extensionAgents) {
 		merged.set(agent.name, agent);
 	}
 
-	// Project agents override user agents with the same name
-	for (const agent of projectAgents) {
-		merged.set(agent.name, agent);
+	// User agents override extension agents with the same name
+	// (loaded when scope is "user" or "both")
+	if (scope === "user" || scope === "both") {
+		for (const agent of userAgents) {
+			merged.set(agent.name, agent);
+		}
+	}
+
+	// Project agents override both extension and user agents with the same name
+	// (loaded when scope is "project" or "both")
+	if (scope === "project" || scope === "both") {
+		for (const agent of projectAgents) {
+			merged.set(agent.name, agent);
+		}
 	}
 
 	return Array.from(merged.values());

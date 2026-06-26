@@ -34,8 +34,8 @@ export type AgentScope = "user" | "project" | "both";
  * Where an agent definition was discovered.
  */
 export interface AgentSource {
-	/** Whether this is a user-level or project-level agent. */
-	type: "user" | "project";
+	/** Whether this is an extension-bundled, user-level, or project-level agent. */
+	type: "user" | "project" | "extension";
 	/** The filesystem path of the `.md` file. */
 	path: string;
 }
